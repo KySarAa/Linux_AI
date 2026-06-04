@@ -2,12 +2,15 @@
 print(">>> Script YOLO lance, initialisation...")
 
 from flask import Flask, Response
+from flask_cors import CORS
 from ultralytics import YOLO
 import cv2
 import numpy as np
 import time
 import serial
 import requests
+import threading
+import socket
 
 from autocam import detect_cameras
 from reader import CameraReader
@@ -16,16 +19,42 @@ os.environ["OPENCV_LOG_LEVEL"] = "SILENT"
 
 
 # ---------------------------------------------------------
-# ESP32 SERIAL
+# ESP32 SERIAL (AUTO-DETECTION)
 # ---------------------------------------------------------
-try:
-    ser = serial.Serial('/dev/ttyACM0', 115200, timeout=0.1)
-    print(">>> ESP32 connecte sur /dev/ttyACM0")
-except Exception as e:
-    print(">>> ERREUR : Impossible d'ouvrir /dev/ttyACM0 :", e)
-    ser = None
+import serial
+import time
 
-last_sent = None  # Anti-spam
+def open_serial():
+    ports = ["/dev/ttyACM0", "/dev/ttyACM1", "/dev/ttyUSB0"]
+    print(">>> Recherche du port serie ESP32...")
+
+    for p in ports:
+        for i in range(10):  # 10 tentatives = ~5 secondes
+            try:
+                ser = serial.Serial(p, 115200, timeout=0.1)
+                print(f">>> ESP32 connecte sur {p}")
+                return ser
+            except:
+                time.sleep(0.3)
+
+    print(">>> ERREUR : Aucun port serie ESP32 disponible")
+    return None
+
+ser = open_serial()
+
+# ---------------------------------------------------------
+# LANCER start.py SUR L'ESP32
+# ---------------------------------------------------------
+if ser is not None:
+    try:
+        ser.write(b"import start\n")
+        ser.flush()
+        print(">>> start.py lance sur l'ESP32")
+        time.sleep(0.2)
+    except Exception as e:
+        print(">>> ERREUR lancement start.py :", e)
+
+last_sent = None
 
 # ---------------------------------------------------------
 # GATEWAY
@@ -47,6 +76,13 @@ def send_to_api(is_weed):
 # FLASK + YOLO
 # ---------------------------------------------------------
 app = Flask(__name__)
+CORS(app)
+@app.after_request
+def add_private_network_header(response):
+    response.headers['Access-Control-Allow-Private-Network'] = 'true'
+    response.headers['Access-Control-Allow-Origin'] = '*'
+    return response
+    
 model = YOLO("best.pt")
 
 # ---------------------------------------------------------
@@ -62,7 +98,7 @@ readers = [CameraReader(i) for i in cam_indexes]
 print(f">>> {len(readers)} CameraReader initialises :", cam_indexes)
 
 # ---------------------------------------------------------
-# PARAMÈTRES OPTIMISATION FPS
+# PARAMETRES OPTIMISATION FPS
 # ---------------------------------------------------------
 YOLO_TARGET_SIZE = (640, 360)
 YOLO_FPS_LIMIT   = 20
@@ -103,8 +139,7 @@ def generate_frames():
         # Appliquer YOLO + construire les zones
         # -------------------------------------------------
         processed = [None] * len(frames)
-        zones     = [0, 0, 0]
-        is_weed   = 0  # par défaut : pas de mauvaise herbe
+        is_weed   = 0  # par defaut : pas de mauvaise herbe
 
         if last_results is not None:
             for res_idx, cam_idx in enumerate(valid_indices):
@@ -124,15 +159,7 @@ def generate_frames():
                     cls_name = model.names[cls].lower()
                     label    = f"{model.names[cls]} {conf:.2f}"
 
-                    # Zones ESP32
-                    if cls == 0:
-                        zones[0] = 1
-                    elif cls == 1:
-                        zones[1] = 1
-                    elif cls == 2:
-                        zones[2] = 1
-
-                    # Carré détecté ? is_weed = 1
+                    # Carre detecte ? is_weed = 1
                     if cls_name == WEED_CLASS:
                         is_weed = 1
 
@@ -143,22 +170,41 @@ def generate_frames():
                 processed[cam_idx] = frame
 
         # -------------------------------------------------
-        # ENVOI ESP32 + GATEWAY (anti-spam)
+        # ENVOI ESP32 + GATEWAY (1 seule electrovanne)
         # -------------------------------------------------
+
+        # 3 zones par défaut
+        zones = [0, 0, 0]
+
+        # Pour chaque caméra valide
+        for res_idx, cam_idx in enumerate(valid_indices):
+            r = last_results[res_idx]
+            weed_detected = False
+
+            for box in r.boxes:
+                cls_name = model.names[int(box.cls[0])].lower()
+                if cls_name == WEED_CLASS:
+                    weed_detected = True
+                    break
+
+            # Si mauvaise herbe détectée ? zone = 1
+            if weed_detected:
+                zones[cam_idx] = 1
+
+        # Anti-spam : n'envoyer que si changement
         if zones != last_sent:
             if ser is not None:
-                msg = f"{zones[0]},{zones[1]},{zones[2]}\n"
-                ser.write(msg.encode())
+                msg = '{"cmd":"ai_zones","value":' + str(zones) + '}\n'
+                ser.write(msg.encode("utf-8"))
+                ser.flush()
+                time.sleep(0.01)
                 print(">>> Envoi ESP32 :", msg.strip())
 
+            # API : 1 si au moins une zone active
+            is_weed = 1 if any(zones) else 0
             send_to_api(is_weed)
-            last_sent = zones
 
-        # Lecture ACK ESP32
-        if ser is not None and ser.in_waiting:
-            ack = ser.readline().decode().strip()
-            if ack:
-                print(">>> Reponse ESP32 :", ack)
+            last_sent = zones.copy()
 
         # -------------------------------------------------
         # Construction du flux final
@@ -194,7 +240,31 @@ def video():
         mimetype='multipart/x-mixed-replace; boundary=frame'
     )
 
+# ---------------------------------------------------------
+# RAPPORT IP AUTOMATIQUE
+# ---------------------------------------------------------
+def get_local_ip():
+    try:
+        s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        s.connect(('8.8.8.8', 80))
+        ip = s.getsockname()[0]
+        s.close()
+        return ip
+    except:
+        return '127.0.0.1'
 
-if __name__ == "__main__":
-    print(">>> Serveur YOLO en ligne sur /video")
-    app.run(host="0.0.0.0", port=5000, debug=False)
+def ip_reporter_thread():
+    url = 'http://127.0.0.1:8088/api/robot/ip'
+    print('[NETWORK] Demarrage du rapport dIP pour la video...')
+    while True:
+        try:
+            ip = get_local_ip()
+            requests.post(url, json={'ip': ip}, timeout=3)
+        except:
+            pass
+        time.sleep(30)
+
+if __name__ == '__main__':
+    threading.Thread(target=ip_reporter_thread, daemon=True).start()
+    print('>>> Serveur YOLO en ligne sur /video')
+    app.run(host='0.0.0.0', port=5000, debug=False)

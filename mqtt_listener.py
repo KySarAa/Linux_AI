@@ -34,6 +34,9 @@ PYTHON_SYS  = "python3"
 YOLOV5_PATH     = "/home/ajpi/yolov5/models/yolov5.py"
 YOLOBESTPT_PATH = "/home/ajpi/yolov5/models/yolobestpt.py"
 RTK_PATH        = "/home/ajpi/RTKfinal.py"
+YOLOBESTPT2_PATH = "/home/ajpi/yolov5/models/Project/Yolobestpt2.py"
+LIGHT_PATH = "/home/ajpi/light.py"
+
 
 
 # -------------------------
@@ -119,6 +122,49 @@ def on_message(client, userdata, msg):
         else:
             print("yolobestpt.py n est pas actif.")
 
+    # ============================================================
+    # YOLO BEST PT 2
+    # ============================================================
+    elif command == "run:Yolobestpt2":
+        if "yolobestpt2" not in processes or processes["yolobestpt2"].poll() is not None:
+            print("Demarrage de Yolobestpt2.py...")
+            processes["yolobestpt2"] = subprocess.Popen(
+                [PYTHON_VENV, YOLOBESTPT2_PATH],
+                cwd="/home/ajpi/yolov5/models/Project"
+            )
+        else:
+            print("Yolobestpt2.py deja en cours.")
+
+    elif command == "stop:Yolobestpt2":
+        if "yolobestpt2" in processes and processes["yolobestpt2"].poll() is None:
+            print("Arret de Yolobestpt2.py...")
+            os.kill(processes["Yolobestpt2"].pid, signal.SIGTERM)
+            processes["yolobestpt2"].wait()
+            print("Yolobestpt2.py arrete.")
+        else:
+            print("Yolobestpt2.py n est pas actif.")
+            
+    # ============================================================
+    # LIGHT
+    # ============================================================
+    elif command == "run:light":
+        if "light" not in processes or processes["light"].poll() is not None:
+            print("Demarrage de light.py...")
+            processes["light"] = subprocess.Popen(
+                [PYTHON_SYS, LIGHT_PATH],
+                cwd="/home/ajpi"
+            )
+        else:
+            print("light.py deja en cours.")
+
+    elif command == "stop:light":
+        if "light" in processes and processes["light"].poll() is None:
+            print("Arret de light.py...")
+            os.kill(processes["light"].pid, signal.SIGTERM)
+            processes["light"].wait()
+            print("light.py arrete.")
+        else:
+            print("light.py n est pas actif.")
 
 # -------------------------
 # LANCEMENT MQTT

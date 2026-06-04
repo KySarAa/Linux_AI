@@ -1,8 +1,9 @@
 from flask import Flask, request, Response
 import requests
+import os
 
-UPSTREAM = "http://lycee-malraux.fr:5656"
-TOKEN = "5|In6J9lfn5IgkEQUuwhcWXCyuYNKVcJaYGbD6wyV726fc7975"
+UPSTREAM = "https://agria.lycee-malraux.fr/"
+TOKEN = os.getenv("AGRIA_TOKEN")
 print("[GATEWAY] Token loaded:", TOKEN[:20] + "...")
 
 app = Flask(__name__)
